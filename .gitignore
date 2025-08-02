@@ -64,6 +64,7 @@ logs/
 config.py
 secrets.py
 token.txt
+.env
 
 # Temporary files
 *.tmp
