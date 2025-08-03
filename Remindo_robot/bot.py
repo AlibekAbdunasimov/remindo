@@ -101,13 +101,39 @@ async def get_topic_info(update, context=None):
         # In forum groups: message_thread_id = 1 is general chat, > 1 are topics
         # In regular groups: message_thread_id might exist but should be treated as general
         if chat.id < 0 and hasattr(chat, 'is_forum') and chat.is_forum:
-            if update.message.message_thread_id == 1:
+            if update.message.message_thread_id == 1 or update.message.message_thread_id is None:
                 # General chat in forum group
                 topic_id = None
                 topic_name = ""
             else:
                 # Topic chat in forum group
                 topic_id = update.message.message_thread_id
+                topic_name = f"Topic #{topic_id}"
+        else:
+            # Regular group chat (not forum)
+            topic_id = None
+            topic_name = ""
+    
+    return topic_id, topic_name
+
+async def get_topic_info_from_callback(query):
+    """Get topic information from callback query"""
+    chat = query.message.chat
+    topic_id = None
+    topic_name = ""
+    
+    # Check if this is a topic message
+    if hasattr(query.message, 'message_thread_id') and query.message.message_thread_id:
+        # In forum groups: message_thread_id = 1 is general chat, > 1 are topics
+        # In regular groups: message_thread_id might exist but should be treated as general
+        if chat.id < 0 and hasattr(chat, 'is_forum') and chat.is_forum:
+            if query.message.message_thread_id == 1 or query.message.message_thread_id is None:
+                # General chat in forum group
+                topic_id = None
+                topic_name = ""
+            else:
+                # Topic chat in forum group
+                topic_id = query.message.message_thread_id
                 topic_name = f"Topic #{topic_id}"
         else:
             # Regular group chat (not forum)
@@ -254,18 +280,18 @@ async def handle_topic_closed_error(update: Update, context: ContextTypes.DEFAUL
     try:
         if error_message:
             await update.message.reply_text(
-                f"❌ **Topic Closed Error**\n\n"
+                f"❌ Topic Closed Error\n\n"
                 f"{error_message}\n\n"
-                "**Solution:**\n"
+                "Solution:\n"
                 "• Move to a different topic or the general chat\n"
                 "• Or ask an admin to reopen the topic\n"
                 "• You can still use bot commands in other topics"
             )
         else:
             await update.message.reply_text(
-                "❌ **Topic Closed Error**\n\n"
+                "❌ Topic Closed Error\n\n"
                 "This topic has been closed and the bot cannot send messages here.\n\n"
-                "**Solution:**\n"
+                "Solution:\n"
                 "• Move to a different topic or the general chat\n"
                 "• Or ask an admin to reopen the topic\n"
                 "• You can still use bot commands in other topics"
@@ -292,22 +318,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Check if timezone is default (UTC)
         timezone_warning = ""
         if current_tz == "UTC":
-            timezone_warning = "\n⚠️ **Important:** Please set your timezone using /settimezone before creating reminders to ensure accurate timing!\n"
+            timezone_warning = "\n⚠️ Important: Please set your timezone using /settimezone before creating reminders to ensure accurate timing!\n"
         
-        await update.message.reply_text(
-            f"Hello! I am your reminder bot{topic_info}. Here are the available commands:\n\n"
-            "📝 Reminder Management:\n"
-            "• /remind - Set a new reminder\n"
-            "• /list - View reminders in current topic\n"
-            "• /list all - View all reminders in this group\n"
-            "• /delete <id> - Delete a specific reminder\n"
-            "• /edit <id> - Edit an existing reminder\n\n"
-                    "⚙️ Settings:\n"
-        "• /settimezone - Set timezone (admin only in groups)\n\n"
-            "Example: /remind 9:00 Take medicine\n\n"
-            "💡 Topic Support: Reminders are automatically organized by topics in forum groups!"
-            f"{timezone_warning}"
-        )
+        # Check if user is admin to show admin commands
+        is_admin = await check_admin_permissions(update, context)
+        
+        start_text = f"Hello! I am your reminder bot{topic_info}. Here are the available commands:\n\n"
+        start_text += "📝 Reminder Management:\n"
+        start_text += "• /remind - Set a new reminder\n"
+        start_text += "• /list - View reminders in current topic\n"
+        start_text += "• /list all - View all reminders in this group\n"
+        start_text += "• /delete <id> - Delete a specific reminder\n"
+        start_text += "• /edit <id> - Edit an existing reminder\n\n"
+        start_text += "⚙️ Settings:\n"
+        start_text += "• /settimezone - Set timezone (admin only in groups)\n\n"
+        
+        if is_admin:
+            start_text += "👑 Admin Commands:\n"
+            start_text += "• /adminlist - View all reminders in group\n"
+            start_text += "• /admindelete <id> - Delete any reminder in group\n\n"
+        
+        start_text += "Example: /remind 9:00 Take medicine\n\n"
+        start_text += "💡 Topic Support: Reminders are automatically organized by topics in forum groups!"
+        start_text += f"{timezone_warning}"
+        
+        await update.message.reply_text(start_text)
     except BadRequest as e:
         if "Topic_closed" in str(e):
             await handle_topic_closed_error(update, context)
@@ -316,8 +351,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update, context):
     try:
-        await update.message.reply_text(
-                    """
+        # Check if user is admin to show admin commands
+        is_admin = await check_admin_permissions(update, context)
+        
+        help_text = """
 🤖 Remindo Bot Help
 
 📝 Reminder Management:
@@ -329,11 +366,22 @@ async def help_command(update, context):
 • /edit <id> — Edit an existing reminder
 
 ⚙️ Settings:
-• /settimezone — Set timezone (admin only in groups)
+• /settimezone — Set timezone (admin only in groups)"""
+        
+        if is_admin:
+            help_text += """
+
+👑 Admin Commands:
+• /adminlist — View all reminders in group
+• /adminlist all — View all reminders from all topics
+• /admindelete <id> — Delete any reminder in group"""
+        
+        help_text += """
 
 For help or feedback, contact: @Type2Alibek_bot
         """
-        )
+        
+        await update.message.reply_text(help_text)
     except BadRequest as e:
         if "Topic_closed" in str(e):
             await handle_topic_closed_error(update, context)
@@ -344,8 +392,8 @@ async def settimezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check if this is an anonymous message (sent as group)
     if update.message.from_user.is_bot and update.message.from_user.username == 'GroupAnonymousBot':
         await update.message.reply_text(
-            "❌ **Anonymous commands are not supported for `/settimezone`**\n\n"
-            "Please send the `/settimezone` command as yourself (not as the group) to set your timezone.\n\n"
+            "❌ Anonymous commands are not supported for /settimezone\n\n"
+            "Please send the /settimezone command as yourself (not as the group) to set your timezone.\n\n"
             "To disable 'Send as Group' for this bot:\n"
             "1. Go to group settings\n"
             "2. Find this bot in the admin list\n"
@@ -363,15 +411,15 @@ async def settimezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_member = await context.bot.get_chat_member(chat.id, user_id)
             if chat_member.status not in ['administrator', 'creator']:
                 await update.message.reply_text(
-                    "❌ **Admin Only Command**\n\n"
+                    "❌ Admin Only Command\n\n"
                     "Only administrators can set the timezone for this group.\n\n"
-                    "Please ask an admin to use `/settimezone` to set the group's timezone."
+                    "Please ask an admin to use /settimezone to set the group's timezone."
                 )
                 return
         except Exception as e:
             logging.error(f"Failed to check admin status for user {user_id} in chat {chat.id}: {e}")
             await update.message.reply_text(
-                "❌ **Error checking permissions**\n\n"
+                "❌ Error checking permissions\n\n"
                 "Unable to verify if you are an admin. Please try again or contact an admin."
             )
             return
@@ -433,8 +481,8 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check if this is an anonymous message (sent as group)
     if update.message.from_user.is_bot and update.message.from_user.username == 'GroupAnonymousBot':
         await update.message.reply_text(
-            "❌ **Anonymous commands are not supported for `/remind`**\n\n"
-            "Please send the `/remind` command as yourself (not as the group) to create reminders.\n\n"
+            "❌ Anonymous commands are not supported for /remind\n\n"
+            "Please send the /remind command as yourself (not as the group) to create reminders.\n\n"
             "To disable 'Send as Group' for this bot:\n"
             "1. Go to group settings\n"
             "2. Find this bot in the admin list\n"
@@ -614,7 +662,10 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
                 except Exception as e:
                     logging.warning(f"Failed to remove old job {job_id}: {e}")
             
-            if db.update_reminder(reminder_id, user_id, message=text):
+            # Use regular update function
+            success = db.update_reminder(reminder_id, user_id, message=text)
+            
+            if success:
                 # Get the updated reminder details
                 reminder_data = db.get_reminder_by_id(reminder_id, user_id)
                 if reminder_data:
@@ -1884,6 +1935,106 @@ async def reminder_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         await query.edit_message_text("Timezone selection cancelled.")
     
+    # Admin callback handlers
+    elif query.data.startswith("admin_delete_start:"):
+        await query.answer()
+        # Get all reminders in the group for admin to delete
+        chat_id = query.message.chat.id
+        
+        # Parse topic context from callback data
+        parts = query.data.split(":", 1)
+        if len(parts) == 2:
+            topic_context = parts[1]
+            if topic_context == "all":
+                topic_id = None
+                topic_name = ""
+                logging.info("Callback: Getting ALL reminders (general topic)")
+            elif topic_context.startswith("topic:"):
+                topic_id = int(topic_context.split(":", 1)[1])
+                topic_name = f"Topic #{topic_id}"
+                logging.info(f"Callback: Getting reminders for specific topic {topic_id}")
+            else:
+                # Fallback to old method
+                topic_id, topic_name = await get_topic_info_from_callback(query)
+        else:
+            # Fallback to old method
+            topic_id, topic_name = await get_topic_info_from_callback(query)
+        
+
+        
+        # If we're in general topic (topic_id is None or 1), get only general topic reminders
+        # Otherwise, get reminders for specific topic
+        if topic_id is None or topic_id == 1:
+            reminders = db.get_general_topic_reminders(chat_id)  # Only general topic reminders
+            topic_info = " (General Topic)"
+        else:
+            reminders = db.get_all_group_reminders(chat_id, topic_id)  # Specific topic
+            topic_info = f" in {topic_name}"
+        
+        if not reminders:
+            await query.edit_message_text(f"No reminders found{topic_info} to delete.")
+            return
+        
+        # Create keyboard with reminders to delete
+        keyboard = []
+        for reminder in reminders[:20]:  # Limit to 20 reminders
+            reminder_id, user_id, message_text, remind_time, timezone, is_recurring, recurrence_type, day_of_week, topic_id = reminder
+            
+            # Get user info
+            try:
+                user = await context.bot.get_chat_member(chat_id, user_id)
+                user_name = user.user.first_name or user.user.username or f"User {user_id}"
+            except:
+                user_name = f"User {user_id}"
+            
+            # Truncate message if too long
+            if len(message_text) > 30:
+                message_text = message_text[:27] + "..."
+            
+            keyboard.append([InlineKeyboardButton(f"🗑️ {reminder_id}: {user_name} - {message_text}", callback_data=f"admin_delete_reminder:{reminder_id}")])
+        
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="admin_delete_cancel")])
+        
+        await query.edit_message_text(
+            f"🗑️ Select a reminder to delete{topic_info}:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    
+    elif query.data == "admin_delete_cancel":
+        await query.answer()
+        await query.edit_message_text("Delete operation cancelled.")
+    
+    elif query.data.startswith("admin_delete_reminder:"):
+        reminder_id = int(query.data.split(":", 1)[1])
+        chat_id = query.message.chat.id
+        
+        # Get reminder details
+        reminder = db.get_reminder_by_id_admin(reminder_id, chat_id)
+        if not reminder:
+            await query.edit_message_text("❌ Reminder not found.")
+            return
+        
+        # Get the job IDs before deleting
+        job_ids = db.get_reminder_job_ids(reminder_id)
+        
+        # Delete the reminder
+        if db.admin_delete_reminder(reminder_id, chat_id):
+            # Remove from scheduler
+            for job_id in job_ids:
+                try:
+                    scheduler.remove_job(job_id)
+                    logging.info(f"Removed job {job_id} for deleted reminder {reminder_id}")
+                except Exception as e:
+                    logging.warning(f"Failed to remove job {job_id} for deleted reminder {reminder_id}: {e}")
+            
+            await query.edit_message_text(f"✅ Reminder {reminder_id} has been deleted by admin.")
+        else:
+            await query.edit_message_text("❌ Failed to delete reminder.")
+    
+    elif query.data == "admin_close":
+        await query.answer()
+        await query.edit_message_text("Admin panel closed.")
+    
     else:
         await query.edit_message_text("Invalid selection. Please try again.")
         logging.error(f"User {query.from_user.id} made an invalid selection: {query.data}")
@@ -2066,8 +2217,8 @@ async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check if this is an anonymous message (sent as group)
     if update.message.from_user.is_bot and update.message.from_user.username == 'GroupAnonymousBot':
         await update.message.reply_text(
-            "❌ **Anonymous commands are not supported for `/list`**\n\n"
-            "Please send the `/list` command as yourself (not as the group) to view and manage your reminders.\n\n"
+            "❌ Anonymous commands are not supported for /list\n\n"
+            "Please send the /list command as yourself (not as the group) to view and manage your reminders.\n\n"
             "To disable 'Send as Group' for this bot:\n"
             "1. Go to group settings\n"
             "2. Find this bot in the admin list\n"
@@ -2088,7 +2239,13 @@ async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
     else:
         # Get reminders for current topic only
-        reminders = db.get_user_reminders(user_id, chat_id, topic_id)
+        if topic_id is None or topic_id == 1:
+            # Get only general topic reminders
+            reminders = db.get_user_general_topic_reminders(user_id, chat_id)
+        else:
+            # Get reminders for specific topic
+            reminders = db.get_user_reminders(user_id, chat_id, topic_id)
+        
         if not reminders:
             topic_info = f" in {topic_name}" if topic_id and topic_id != 1 else ""
             await update.message.reply_text(f"You have no active reminders{topic_info}.")
@@ -2168,8 +2325,8 @@ async def delete_reminder_command(update: Update, context: ContextTypes.DEFAULT_
     # Check if this is an anonymous message (sent as group)
     if update.message.from_user.is_bot and update.message.from_user.username == 'GroupAnonymousBot':
         await update.message.reply_text(
-            "❌ **Anonymous commands are not supported for `/delete`**\n\n"
-            "Please send the `/delete` command as yourself (not as the group) to delete reminders.\n\n"
+            "❌ Anonymous commands are not supported for /delete\n\n"
+            "Please send the /delete command as yourself (not as the group) to delete reminders.\n\n"
             "To disable 'Send as Group' for this bot:\n"
             "1. Go to group settings\n"
             "2. Find this bot in the admin list\n"
@@ -2228,8 +2385,8 @@ async def edit_reminder_command(update: Update, context: ContextTypes.DEFAULT_TY
     # Check if this is an anonymous message (sent as group)
     if update.message.from_user.is_bot and update.message.from_user.username == 'GroupAnonymousBot':
         await update.message.reply_text(
-            "❌ **Anonymous commands are not supported for `/edit`**\n\n"
-            "Please send the `/edit` command as yourself (not as the group) to edit reminders.\n\n"
+            "❌ Anonymous commands are not supported for /edit\n\n"
+            "Please send the /edit command as yourself (not as the group) to edit reminders.\n\n"
             "To disable 'Send as Group' for this bot:\n"
             "1. Go to group settings\n"
             "2. Find this bot in the admin list\n"
@@ -2534,7 +2691,210 @@ async def handle_edit_time_input(update: Update, context: ContextTypes.DEFAULT_T
             logging.error(f"Error parsing time: {e}")
             await update.message.reply_text("Invalid time format. Please use HH:MM or 2:30 PM format:")
 
+async def check_admin_permissions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Check if user is admin in the current chat"""
+    chat = update.effective_chat
+    user_id = update.effective_user.id
+    
+    # Allow all users to use admin commands in private chat (they'll get helpful message)
+    if chat.type == "private":
+        return True
+    
+    # For groups/supergroups, check admin status
+    if chat.type not in ["group", "supergroup"]:
+        return False
+    
+    try:
+        chat_member = await context.bot.get_chat_member(chat.id, user_id)
+        return chat_member.status in ['administrator', 'creator']
+    except Exception as e:
+        logging.error(f"Failed to check admin status for user {user_id} in chat {chat.id}: {e}")
+        return False
 
+async def admin_list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to view all reminders in the group"""
+    # Check if this is an anonymous message (sent as group)
+    if update.message.from_user.is_bot and update.message.from_user.username == 'GroupAnonymousBot':
+        await update.message.reply_text(
+            "❌ Anonymous commands are not supported for /adminlist\n\n"
+            "Please send the /adminlist command as yourself (not as the group) to view reminders.\n\n"
+            "To disable 'Send as Group' for this bot:\n"
+            "1. Go to group settings\n"
+            "2. Find this bot in the admin list\n"
+            "3. Disable 'Send as Group' option"
+        )
+        return
+    
+    if not await check_admin_permissions(update, context):
+        await update.message.reply_text(
+            "❌ Admin Only Command\n\n"
+            "Only administrators can use this command."
+        )
+        return
+    
+    # Handle private chat differently
+    if update.effective_chat.type == "private":
+        await update.message.reply_text(
+            "📋 Your Reminders\n\n"
+            "In private chat, you can manage your own reminders using:\n"
+            "• /list - View your reminders\n"
+            "• /delete <id> - Delete your reminder\n"
+            "• /edit <id> - Edit your reminder\n\n"
+            "Admin commands are designed for group management."
+        )
+        return
+    
+    chat_id = update.effective_chat.id
+    topic_id, topic_name = await get_topic_info(update, context)
+    
+    # Check if user wants to see all topics or just current topic
+    show_all_topics = context.args and context.args[0].lower() == 'all'
+    
+    if show_all_topics:
+        # Get reminders for all topics in the chat
+        reminders = db.get_all_group_reminders(chat_id)
+        if not reminders:
+            await update.message.reply_text("No reminders found in this group.")
+            return
+    else:
+        # If we're in general topic (topic_id is None or 1), get only general topic reminders
+        # Otherwise, get reminders for specific topic
+        if topic_id is None or topic_id == 1:
+            reminders = db.get_general_topic_reminders(chat_id)  # Only general topic reminders
+        else:
+            reminders = db.get_all_group_reminders(chat_id, topic_id)  # Specific topic
+        
+        if not reminders:
+            # Fix the error message logic
+            if topic_id is None or topic_id == 1:
+                topic_info = " (General Topic)"
+            else:
+                topic_info = f" in {topic_name}"
+            await update.message.reply_text(f"No reminders found{topic_info}.")
+            return
+    
+    # Format reminders with user info
+    if topic_id is None or topic_id == 1:
+        message = "📋 Group Reminders (General Topic)\n\n"
+    else:
+        message = f"📋 Group Reminders{topic_name}\n\n"
+    message += "💡 Admin Actions:\n"
+    message += "• Click 🗑️ Delete to select a reminder to delete\n"
+    message += "• Use /admindelete <id> for direct deletion\n\n"
+    
+    for reminder in reminders[:20]:  # Limit to 20 reminders
+        reminder_id, user_id, message_text, remind_time, timezone, is_recurring, recurrence_type, day_of_week, topic_id = reminder
+        
+        # Get user info
+        try:
+            user = await context.bot.get_chat_member(chat_id, user_id)
+            user_name = user.user.first_name or user.user.username or f"User {user_id}"
+        except:
+            user_name = f"User {user_id}"
+        
+        # Format time
+        try:
+            tz = pytz.timezone(timezone)
+            if is_recurring:
+                time_display = remind_time  # HH:MM format
+            else:
+                reminder_datetime = dateutil.parser.isoparse(remind_time)
+                time_display = reminder_datetime.strftime("%Y-%m-%d %H:%M")
+        except:
+            time_display = remind_time
+        
+        # Add topic info if we're in general topic
+        if topic_id is None or topic_id == 1:
+            topic_info = f" (Topic {reminder[8]})" if reminder[8] else " (General)"
+            message += f"{reminder_id} - {user_name}{topic_info}\n"
+        else:
+            message += f"{reminder_id} - {user_name}\n"
+        
+        message += f"⏰ {time_display} | 🔄 {'Yes' if is_recurring else 'No'}\n"
+        message += f"💬 {message_text[:50]}{'...' if len(message_text) > 50 else ''}\n\n"
+    
+    # Add action buttons with topic context
+    if topic_id is None or topic_id == 1:
+        delete_callback = "admin_delete_start:all"
+    else:
+        delete_callback = f"admin_delete_start:topic:{topic_id}"
+    
+    keyboard = [
+        [InlineKeyboardButton("🗑️ Delete", callback_data=delete_callback)],
+        [InlineKeyboardButton("❌ Close", callback_data="admin_close")]
+    ]
+    
+    try:
+        await update.message.reply_text(
+            message,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except BadRequest as e:
+        if "Topic_closed" in str(e):
+            await handle_topic_closed_error(update, context)
+        else:
+            raise e
+
+async def admin_delete_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to delete any reminder in the group"""
+    # Check if this is an anonymous message (sent as group)
+    if update.message.from_user.is_bot and update.message.from_user.username == 'GroupAnonymousBot':
+        await update.message.reply_text(
+            "❌ Anonymous commands are not supported for /admindelete\n\n"
+            "Please send the /admindelete command as yourself (not as the group) to delete reminders.\n\n"
+            "To disable 'Send as Group' for this bot:\n"
+            "1. Go to group settings\n"
+            "2. Find this bot in the admin list\n"
+            "3. Disable 'Send as Group' option"
+        )
+        return
+    
+    if not await check_admin_permissions(update, context):
+        await update.message.reply_text("❌ Admin Only Command")
+        return
+    
+    # Handle private chat differently
+    if update.effective_chat.type == "private":
+        await update.message.reply_text(
+            "🗑️ Delete Your Reminder\n\n"
+            "In private chat, you can delete your own reminders using:\n"
+            "• /delete <id> - Delete your reminder\n\n"
+            "Admin commands are designed for group management."
+        )
+        return
+    
+    if not context.args:
+        await update.message.reply_text("Usage: /admindelete <reminder_id>")
+        return
+    
+    try:
+        reminder_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Invalid reminder ID. Please provide a number.")
+        return
+    
+    # Get reminder details
+    reminder = db.get_reminder_by_id_admin(reminder_id, update.effective_chat.id)
+    if not reminder:
+        await update.message.reply_text("❌ Reminder not found.")
+        return
+    
+    # Get the job IDs before deleting
+    job_ids = db.get_reminder_job_ids(reminder_id)
+    
+    # Delete the reminder
+    if db.admin_delete_reminder(reminder_id, update.effective_chat.id):
+        # Remove from scheduler
+        for job_id in job_ids:
+            try:
+                scheduler.remove_job(job_id)
+                logging.info(f"Removed job {job_id} for deleted reminder {reminder_id}")
+            except Exception as e:
+                logging.warning(f"Failed to remove job {job_id} for deleted reminder {reminder_id}: {e}")
+        
+        await update.message.reply_text(f"✅ Reminder {reminder_id} has been deleted by admin.")
+    else:
+        await update.message.reply_text("❌ Failed to delete reminder.")
 
 
 
@@ -2551,6 +2911,11 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("delete", delete_reminder_command))
     app.add_handler(CommandHandler("edit", edit_reminder_command))
     app.add_handler(CommandHandler("help", help_command))
+    
+    # Admin commands
+    app.add_handler(CommandHandler("adminlist", admin_list_reminders))
+    app.add_handler(CommandHandler("admindelete", admin_delete_reminder))
+    
     app.add_handler(CallbackQueryHandler(reminder_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_reminder_text_input))
     

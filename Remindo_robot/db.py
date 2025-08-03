@@ -108,6 +108,18 @@ def get_user_reminders(user_id, chat_id, topic_id=None):
             ''', (user_id, chat_id))
         return c.fetchall()
 
+def get_user_general_topic_reminders(user_id, chat_id):
+    """Get only reminders from general topic (topic_id IS NULL) for a user"""
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute('''
+            SELECT id, message, remind_time, timezone, is_recurring, recurrence_type, day_of_week, is_sent, topic_id
+            FROM reminders 
+            WHERE user_id = ? AND chat_id = ? AND topic_id IS NULL AND (is_sent = 0 OR is_recurring = 1)
+            ORDER BY remind_time ASC
+        ''', (user_id, chat_id))
+        return c.fetchall()
+
 def get_reminder_by_id(reminder_id, user_id):
     """Get a specific reminder by ID, ensuring it belongs to the user"""
     with get_connection() as conn:
@@ -228,3 +240,63 @@ def load_all_timezone_preferences():
         c = conn.cursor()
         c.execute('SELECT entity_id, entity_type, timezone FROM timezone_preferences')
         return c.fetchall() 
+
+def get_all_group_reminders(chat_id, topic_id=None):
+    """Get all reminders in a group (admin function)"""
+    with get_connection() as conn:
+        c = conn.cursor()
+        if topic_id is not None:
+            # Get reminders for specific topic
+            c.execute('''
+                SELECT id, user_id, message, remind_time, timezone, is_recurring, recurrence_type, day_of_week, topic_id
+                FROM reminders 
+                WHERE chat_id = ? AND topic_id = ? AND (is_sent = 0 OR is_recurring = 1)
+                ORDER BY remind_time ASC
+            ''', (chat_id, topic_id))
+        else:
+            # Get ALL reminders in the chat
+            c.execute('''
+                SELECT id, user_id, message, remind_time, timezone, is_recurring, recurrence_type, day_of_week, topic_id
+                FROM reminders 
+                WHERE chat_id = ? AND (is_sent = 0 OR is_recurring = 1)
+                ORDER BY remind_time ASC
+            ''', (chat_id,))
+        
+        return c.fetchall()
+
+def get_general_topic_reminders(chat_id):
+    """Get only reminders from general topic (topic_id IS NULL)"""
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute('''
+            SELECT id, user_id, message, remind_time, timezone, is_recurring, recurrence_type, day_of_week, topic_id
+            FROM reminders 
+            WHERE chat_id = ? AND topic_id IS NULL AND (is_sent = 0 OR is_recurring = 1)
+            ORDER BY remind_time ASC
+        ''', (chat_id,))
+        
+        return c.fetchall()
+
+def get_reminder_by_id_admin(reminder_id, chat_id):
+    """Get a specific reminder by ID for admin (no user restriction)"""
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute('''
+            SELECT id, message, remind_time, timezone, is_recurring, recurrence_type, day_of_week, chat_id, topic_id, user_id
+            FROM reminders 
+            WHERE id = ? AND chat_id = ?
+        ''', (reminder_id, chat_id))
+        return c.fetchone()
+
+def admin_delete_reminder(reminder_id, chat_id):
+    """Delete a reminder by ID for admin (no user restriction)"""
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute('''
+            DELETE FROM reminders 
+            WHERE id = ? AND chat_id = ?
+        ''', (reminder_id, chat_id))
+        conn.commit()
+        return c.rowcount > 0
+
+ 

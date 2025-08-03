@@ -79,6 +79,11 @@ A powerful Telegram reminder bot with support for one-time and recurring reminde
 - `/edit <id>` - Edit an existing reminder
 - `/settimezone` - Set your timezone
 
+### Admin Commands (Group Admins Only)
+- `/adminlist` - View all reminders in the group
+- `/adminlist all` - View all reminders from all topics
+- `/admindelete <id>` - Delete any reminder in the group
+
 ### Creating Reminders
 
 #### One-time Reminders
@@ -113,6 +118,12 @@ A powerful Telegram reminder bot with support for one-time and recurring reminde
 - Reminders are organized by topics
 - Use `/list` to see reminders in current topic
 - Use `/list all` to see all reminders in the group
+
+### Admin Features
+- **Group management**: Admins can view and delete any reminder in the group
+- **Topic support**: Admin commands work with forum group topics
+- **Permission checking**: Only group administrators can use admin commands
+- **Anonymous protection**: Admin commands are protected from "Send as Group" abuse
 
 ## 🔧 Technical Details
 
