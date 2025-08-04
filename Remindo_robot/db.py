@@ -232,7 +232,7 @@ def get_timezone_preference(entity_id, entity_type):
             WHERE entity_id = ? AND entity_type = ?
         ''', (entity_id, entity_type))
         result = c.fetchone()
-        return result[0] if result else 'UTC'
+        return result[0] if result else 'Asia/Tashkent'
 
 def load_all_timezone_preferences():
     """Load all timezone preferences from database"""

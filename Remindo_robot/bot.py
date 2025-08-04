@@ -60,9 +60,9 @@ def get_user_timezone(user_id, chat_type, chat_id):
         tz_str = user_timezones.get(user_id)
         if tz_str is None:
             tz_str = db.get_timezone_preference(user_id, 'user')
-            if tz_str != 'UTC':  # Only update memory if we found a non-default timezone
+            if tz_str != 'Asia/Tashkent':  # Only update memory if we found a non-default timezone
                 user_timezones[user_id] = tz_str
-        return tz_str or 'UTC'
+        return tz_str or 'Asia/Tashkent'
 
 def get_topic_info_from_message(message):
     """Get topic information from a message object (for callback queries)"""
@@ -273,6 +273,9 @@ def create_calendar_keyboard(year, month):
     
     keyboard.append(nav_row)
     
+    # Add cancel button
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="one_time_cancel")])
+    
     return InlineKeyboardMarkup(keyboard)
 
 async def handle_topic_closed_error(update: Update, context: ContextTypes.DEFAULT_TYPE, error_message: str = None):
@@ -401,35 +404,24 @@ async def settimezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Check if user is admin (for groups only)
     chat = update.effective_chat
     user_id = update.message.from_user.id
     
-    if chat.type in ["group", "supergroup"]:
-        # Check if user is admin
-        try:
-            chat_member = await context.bot.get_chat_member(chat.id, user_id)
-            if chat_member.status not in ['administrator', 'creator']:
-                await update.message.reply_text(
-                    "❌ Admin Only Command\n\n"
-                    "Only administrators can set the timezone for this group.\n\n"
-                    "Please ask an admin to use /settimezone to set the group's timezone."
-                )
-                return
-        except Exception as e:
-            logging.error(f"Failed to check admin status for user {user_id} in chat {chat.id}: {e}")
-            await update.message.reply_text(
-                "❌ Error checking permissions\n\n"
-                "Unable to verify if you are an admin. Please try again or contact an admin."
-            )
-            return
+    # Only allow timezone setting in private chats
+    if chat.type != "private":
+        await update.message.reply_text(
+            "❌ Timezone setting is only available in private chat\n\n"
+            "Please use /settimezone in private chat with the bot to set your timezone.\n\n"
+            "To set your timezone:\n"
+            "1. Start a private chat with @remindo_robot\n"
+            "2. Send /settimezone\n"
+            "3. Select your timezone"
+        )
+        return
     
-    if chat.type in ["group", "supergroup"]:
-        who = "group"
-        current_tz = get_user_timezone(user_id, chat.type, chat.id)
-    else:
-        who = "user"
-        current_tz = get_user_timezone(user_id, chat.type, chat.id)
+    # Always set timezone for the user, not the group
+    who = "user"
+    current_tz = get_user_timezone(user_id, chat.type, chat.id)
     
     # Convert IANA timezone to UTC offset for display
     current_tz_display = current_tz
@@ -437,6 +429,10 @@ async def settimezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if tz_name == current_tz:
             current_tz_display = offset
             break
+    
+    # Special handling for Asia/Tashkent (UTC+5)
+    if current_tz == 'Asia/Tashkent':
+        current_tz_display = '+05:00'
     
     # Table layout: 4 columns per row, only offset as label
     offset_keyboard = []
@@ -463,10 +459,10 @@ async def settimezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         await update.message.reply_text(
-            f"🌍 Current timezone: {current_tz_display}\n\n"
+            f"🌍 Your current timezone: {current_tz_display}\n\n"
             f"Please select your timezone (UTC offset):\n"
             f"If you don't know your offset, see: https://en.wikipedia.org/wiki/List_of_UTC_time_offsets\n"
-            f"(This will set the timezone for this {who}.)",
+            f"(This will set your personal timezone for all chats.)",
             reply_markup=reply_markup
         )
     except BadRequest as e:
@@ -490,6 +486,20 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
+    # Check if user has set a custom timezone
+    user_id = update.message.from_user.id
+    chat = update.effective_chat
+    current_tz = get_user_timezone(user_id, chat.type, chat.id)
+    
+    # Check if user has explicitly set a timezone in database
+    db_tz = db.get_timezone_preference(user_id, 'user')
+    timezone_warning = ""
+    if db_tz == 'Asia/Tashkent':  # User hasn't explicitly set a timezone (UTC+5)
+        if chat.type == "private":
+            timezone_warning = "\n\n⚠️ Timezone Notice: You're using the default timezone (UTC+5). To set your personal timezone, use /settimezone."
+        else:
+            timezone_warning = "\n\n⚠️ Timezone Notice: You're using the default timezone (UTC+5). To set your personal timezone, use /settimezone in private chat with @remindo_robot"
+    
     if not context.args:
         # Show buttons for reminder types
         keyboard = [
@@ -499,7 +509,7 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
         try:
             await update.message.reply_text(
-                "Choose reminder type:",
+                f"Choose reminder type:{timezone_warning}",
                 reply_markup=reply_markup
             )
         except BadRequest as e:
@@ -514,7 +524,7 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
     command_and_rest = original_text.split(None, 1)
     if len(command_and_rest) < 2:
         try:
-            await update.message.reply_text("Usage: /remind <time or recurrence> <message>")
+            await update.message.reply_text(f"Usage: /remind <time or recurrence> <message>{timezone_warning}")
         except BadRequest as e:
             if "Topic_closed" in str(e):
                 await handle_topic_closed_error(update, context)
@@ -568,7 +578,7 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # One-time reminder (existing logic)
     command_and_time = original_text.split(None, 2)
     if len(command_and_time) < 3:
-        await update.message.reply_text("Usage: /remind <time> <message>\nExample: /remind 9:00 Take medicine")
+        await update.message.reply_text(f"Usage: /remind <time> <message>\nExample: /remind 9:00 Take medicine{timezone_warning}")
         return
     time_str = context.args[0]
     reminder_msg = command_and_time[2]
@@ -640,6 +650,18 @@ async def transition_to_time_input(update: Update, context: ContextTypes.DEFAULT
 async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle text input for reminder creation and editing"""
     user_id = update.effective_user.id
+    text = update.message.text
+    
+    # Check message length limit (Telegram message limit is 4096 characters)
+    # We'll use 4000 to leave room for bot formatting and other text
+    MAX_MESSAGE_LENGTH = 4000
+    if len(text) > MAX_MESSAGE_LENGTH:
+        await update.message.reply_text(
+            f"❌ Message is too long! Maximum {MAX_MESSAGE_LENGTH} characters allowed.\n"
+            f"Your message has {len(text)} characters.\n\n"
+            "Please send a shorter message:"
+        )
+        return
     
 
     
@@ -1220,7 +1242,7 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
                             await update.message.reply_text(
                                 f"Selected days: {selected_text}\n"
                                 f"Time: {time_str}\n\n"
-                                "Now send your reminder message:"
+                                "Now send your reminder message (max 4000 characters):"
                             )
                             return
                     except ValueError:
@@ -1238,7 +1260,7 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
                     await update.message.reply_text(
                         f"Selected days: {selected_text}\n"
                         f"Time: {time_str}\n\n"
-                        "Now send your reminder message:"
+                        "Now send your reminder message (max 4000 characters):"
                     )
                     return
                 else:
@@ -1301,9 +1323,11 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
         db.update_reminder(reminder_id, user_id, job_id=job.id)
         
         topic_info = f" in {topic_name}" if topic_id else ""
+        # Truncate message for confirmation to avoid "Message is too long" error
+        truncated_message = message[:200] + "..." if len(message) > 200 else message
         await update.message.reply_text(
             f"✅ Reminder set for {reminder_time.strftime('%Y-%m-%d %H:%M:%S %Z')}{topic_info}!\n"
-            f"Message: {message}"
+            f"Message: {truncated_message}"
         )
         
         # Clear user context
@@ -1383,9 +1407,11 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
             selected_text = ", ".join([day.title() for day in selected_days])
         
         topic_info = f" in {topic_name}" if topic_id else ""
+        # Truncate message for confirmation to avoid "Message is too long" error
+        truncated_message = message[:200] + "..." if len(message) > 200 else message
         await update.message.reply_text(
             f"✅ Recurring reminder set for {selected_text} at {time_str} ({tz_str}){topic_info}!\n"
-            f"Message: {message}"
+            f"Message: {truncated_message}"
         )
         
         # Clear user context
@@ -1624,6 +1650,20 @@ async def reminder_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del user_reminder_context[user_id]
         await query.edit_message_text("Recurring reminder creation cancelled.")
     
+    elif query.data == "one_time_cancel":
+        user_id = query.from_user.id
+        if user_id in user_edit_context:
+            # This is for editing - use edit cancel logic
+            del user_edit_context[user_id]
+            await query.edit_message_text("Edit cancelled.")
+        elif user_id in user_reminder_context:
+            # This is for creating new reminder
+            del user_reminder_context[user_id]
+            await query.edit_message_text("One-time reminder creation cancelled.")
+        else:
+            # Fallback
+            await query.edit_message_text("Operation cancelled.")
+    
     elif query.data.startswith("calendar:"):
         # Handle calendar navigation
         year_month = query.data.split(":", 1)[1]
@@ -1688,7 +1728,11 @@ async def reminder_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         for reminder in reminders:
             reminder_id = reminder[0]
-            keyboard.append([InlineKeyboardButton(f"Edit {reminder_id}", callback_data=f"edit_reminder:{reminder_id}")])
+            message = reminder[1]
+            # Truncate message if too long
+            if len(message) > 30:
+                message = message[:27] + "..."
+            keyboard.append([InlineKeyboardButton(f"✏️ {reminder_id}: {message}", callback_data=f"edit_reminder:{reminder_id}")])
         
         keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="edit_cancel")])
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1819,7 +1863,7 @@ async def reminder_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = query.from_user.id
         if user_id in user_edit_context:
             user_edit_context[user_id]["field_to_edit"] = "message"
-            await query.edit_message_text("Please send the new message for your reminder:")
+            await query.edit_message_text("Please send the new message for your reminder (max 4000 characters):")
     
     elif query.data == "edit_time":
         user_id = query.from_user.id
@@ -1895,9 +1939,12 @@ async def reminder_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Show calendar for date selection (one-time reminder)
                 today = datetime.now()
                 keyboard = create_calendar_keyboard(today.year, today.month)
-                await query.edit_message_text(
-                    "Select a new date for your reminder:",
-                    reply_markup=keyboard
+                await query.edit_message_text("Edit cancelled.")
+                await context.bot.send_message(
+                    chat_id=query.message.chat.id,
+                    text="Select a date for your reminder:",
+                    reply_markup=keyboard,
+                    message_thread_id=query.message.message_thread_id if hasattr(query.message, 'message_thread_id') and query.message.message_thread_id else None
                 )
                 return SELECTING_DATE
     
@@ -1912,18 +1959,11 @@ async def reminder_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if tz_str:
             try:
                 pytz.timezone(tz_str)
-                # Set timezone for group or user
-                chat = query.message.chat
-                if chat.type in ["group", "supergroup"]:
-                    chat_timezones[chat.id] = tz_str
-                    db.save_timezone_preference(chat.id, 'chat', tz_str)
-                    await query.edit_message_text(f"Timezone for this group set to {offset}.")
-                    logging.info(f"Group {chat.id} set timezone to {tz_str} via offset {offset}")
-                else:
-                    user_timezones[query.from_user.id] = tz_str
-                    db.save_timezone_preference(query.from_user.id, 'user', tz_str)
-                    await query.edit_message_text(f"Timezone set to {offset}.")
-                    logging.info(f"User {query.from_user.id} set timezone to {tz_str} via offset {offset}")
+                # Always set timezone for the user, not the group
+                user_timezones[query.from_user.id] = tz_str
+                db.save_timezone_preference(query.from_user.id, 'user', tz_str)
+                await query.edit_message_text(f"✅ Your timezone has been set to {offset}.")
+                logging.info(f"User {query.from_user.id} set timezone to {tz_str} via offset {offset}")
             except Exception:
                 await query.edit_message_text("Invalid offset selected. Please try again.")
                 logging.error(f"User {query.from_user.id} tried to set invalid offset: {offset}")
@@ -2290,7 +2330,7 @@ async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reminder_type = "🔄" if is_recurring else "⏰"
         message += f"{reminder_type} ID: {reminder_id}\n"
         message += f"📅 {time_display}\n"
-        message += f"💬 {msg}\n"
+        message += f"💬 {msg[:50]}{'...' if len(msg) > 50 else ''}\n"
         
         # Add topic information when showing all reminders
         if show_all_topics and reminder_topic_id is not None:
@@ -2480,7 +2520,7 @@ async def handle_edit_selection(update: Update, context: ContextTypes.DEFAULT_TY
     
     if query.data == "edit_message":
         user_edit_context[user_id]["field_to_edit"] = "message"
-        await query.edit_message_text("Please send the new message for your reminder:")
+        await query.edit_message_text("Please send the new message for your reminder (max 4000 characters):")
         return ENTERING_MESSAGE
     
     elif query.data == "edit_time":
@@ -2553,9 +2593,12 @@ async def handle_edit_selection(update: Update, context: ContextTypes.DEFAULT_TY
             # Show calendar for date selection (one-time reminder)
             today = datetime.now()
             keyboard = create_calendar_keyboard(today.year, today.month)
-            await query.edit_message_text(
-                "Select a new date for your reminder:",
-                reply_markup=keyboard
+            await query.edit_message_text("Edit cancelled.")
+            await context.bot.send_message(
+                chat_id=query.message.chat.id,
+                text="Select a date for your reminder:",
+                reply_markup=keyboard,
+                message_thread_id=query.message.message_thread_id if hasattr(query.message, 'message_thread_id') and query.message.message_thread_id else None
             )
             return SELECTING_DATE
     
