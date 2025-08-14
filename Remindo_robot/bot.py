@@ -12,6 +12,7 @@ import dateutil.parser
 import re
 from calendar import monthcalendar, month_name
 import calendar
+import notes_bot
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -46,23 +47,34 @@ def load_timezone_preferences():
             chat_timezones[entity_id] = timezone
 
 def get_user_timezone(user_id, chat_type, chat_id):
-    """Get timezone for a user or chat, with database fallback"""
+    """Resolve effective timezone with precedence: user override > chat > defaults.
+
+    - If the user has explicitly set a personal timezone, use it everywhere (including groups)
+    - Otherwise, in groups use the chat timezone if set (admin-configured)
+    - Fall back to sensible defaults (user: Asia/Tashkent, chat: UTC)
+    """
+    # First check user-specific timezone (works in both private and group chats)
+    user_tz = user_timezones.get(user_id)
+    if user_tz is None:
+        user_tz = db.get_timezone_preference(user_id, 'user')
+        if user_tz != 'Asia/Tashkent':  # Cache only non-defaults
+            user_timezones[user_id] = user_tz
+
+    # If user has an explicit non-default timezone, prefer it
+    if user_tz and user_tz != 'Asia/Tashkent':
+        return user_tz
+
+    # Otherwise, if in a group/supergroup, try chat timezone next
     if chat_type in ["group", "supergroup"]:
-        # Try memory first, then database
-        tz_str = chat_timezones.get(chat_id)
-        if tz_str is None:
-            tz_str = db.get_timezone_preference(chat_id, 'chat')
-            if tz_str != 'UTC':  # Only update memory if we found a non-default timezone
-                chat_timezones[chat_id] = tz_str
-        return tz_str or 'UTC'
-    else:
-        # Try memory first, then database
-        tz_str = user_timezones.get(user_id)
-        if tz_str is None:
-            tz_str = db.get_timezone_preference(user_id, 'user')
-            if tz_str != 'Asia/Tashkent':  # Only update memory if we found a non-default timezone
-                user_timezones[user_id] = tz_str
-        return tz_str or 'Asia/Tashkent'
+        chat_tz = chat_timezones.get(chat_id)
+        if chat_tz is None:
+            chat_tz = db.get_timezone_preference(chat_id, 'chat')
+            if chat_tz != 'UTC':  # Cache only non-defaults
+                chat_timezones[chat_id] = chat_tz
+        return chat_tz or 'UTC'
+
+    # Private chats fall back to the user's default
+    return user_tz or 'Asia/Tashkent'
 
 def get_topic_info_from_message(message):
     """Get topic information from a message object (for callback queries)"""
@@ -96,24 +108,38 @@ async def get_topic_info(update, context=None):
     topic_id = None
     topic_name = ""
     
+    # Add detailed logging for reminder system
+    logging.info(f"REMINDER get_topic_info - Chat ID: {chat.id}, Chat type: {chat.type}")
+    logging.info(f"REMINDER get_topic_info - Has message_thread_id: {hasattr(update.message, 'message_thread_id')}")
+    logging.info(f"REMINDER get_topic_info - Message thread ID: {getattr(update.message, 'message_thread_id', 'None')}")
+    logging.info(f"REMINDER get_topic_info - Is forum: {getattr(chat, 'is_forum', 'Unknown')}")
+    logging.info(f"REMINDER get_topic_info - Chat ID < 0: {chat.id < 0}")
+    
     # Check if this is a topic message
     if hasattr(update.message, 'message_thread_id') and update.message.message_thread_id:
         # In forum groups: message_thread_id = 1 is general chat, > 1 are topics
         # In regular groups: message_thread_id might exist but should be treated as general
         if chat.id < 0 and hasattr(chat, 'is_forum') and chat.is_forum:
+            logging.info(f"REMINDER get_topic_info - Forum group detected")
             if update.message.message_thread_id == 1 or update.message.message_thread_id is None:
                 # General chat in forum group
                 topic_id = None
                 topic_name = ""
+                logging.info(f"REMINDER get_topic_info - General chat in forum (message_thread_id = {update.message.message_thread_id})")
             else:
                 # Topic chat in forum group
                 topic_id = update.message.message_thread_id
                 topic_name = f"Topic #{topic_id}"
+                logging.info(f"REMINDER get_topic_info - Topic chat in forum (message_thread_id = {update.message.message_thread_id})")
         else:
             # Regular group chat (not forum)
             topic_id = None
             topic_name = ""
+            logging.info(f"REMINDER get_topic_info - Regular group chat (not forum)")
+    else:
+        logging.info(f"REMINDER get_topic_info - No message_thread_id attribute or it's None")
     
+    logging.info(f"REMINDER get_topic_info - Final topic_id: {topic_id}, topic_name: {topic_name}")
     return topic_id, topic_name
 
 async def get_topic_info_from_callback(query):
@@ -333,6 +359,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         start_text += "• /list all - View all reminders in this group\n"
         start_text += "• /delete <id> - Delete a specific reminder\n"
         start_text += "• /edit <id> - Edit an existing reminder\n\n"
+        start_text += "📋 Note Taking (Supergroups Only):\n"
+        start_text += "• /note - Save a message as a note (reply to message)\n"
+        start_text += "• /notes - View notes in current topic\n"
+        start_text += "• /notes all - View all notes in this group\n"
+        start_text += "• /deletenote <id> - Delete a specific note\n"
+        start_text += "• /editnote <id> - Edit a note's title\n\n"
         start_text += "⚙️ Settings:\n"
         start_text += "• /settimezone - Set timezone (admin only in groups)\n\n"
         
@@ -367,6 +399,15 @@ async def help_command(update, context):
 • /list all — View all reminders in this group
 • /delete <id> — Delete a specific reminder
 • /edit <id> — Edit an existing reminder
+
+📋 Note Taking (Supergroups Only):
+• /note — Save a message as a note (reply to message)
+• /note <title> — Save with a title
+• /note <text> — Create a new note
+• /notes — View notes in current topic
+• /notes all — View all notes in this group
+• /deletenote <id> — Delete a specific note
+• /editnote <id> — Edit a note's title
 
 ⚙️ Settings:
 • /settimezone — Set timezone (admin only in groups)"""
@@ -663,6 +704,24 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
         )
         return
     
+    # Check if user is in note editing context first
+    if user_id in notes_bot.user_note_context:
+        user_context = notes_bot.user_note_context[user_id]
+        step = user_context.get("step")
+        
+        if step == "editing_title":
+            note_id = user_context["note_id"]
+            new_title = update.message.text
+            
+            if notes_bot.notes_db.update_note(note_id, user_id, title=new_title):
+                await update.message.reply_text(f"✅ Title updated successfully for Note #{note_id}!")
+            else:
+                await update.message.reply_text("❌ Failed to update title.")
+            
+            # Clear user context
+            del notes_bot.user_note_context[user_id]
+            return
+    
 
     
     # Check if user is in edit context
@@ -695,8 +754,52 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
                     
                     # Handle recurring reminders differently
                     if is_recurring:
-                        # For recurring reminders, remind_time is just a time string (e.g., "15:30")
-                        # We don't need to reschedule the job since it's a recurring cron job
+                        # For recurring reminders, we need to reschedule the job with the new message
+                        try:
+                            tz = pytz.timezone(timezone)
+                        except Exception:
+                            tz = pytz.UTC
+                        
+                        # Parse time string (e.g., "15:30") for recurring reminders
+                        hour, minute = map(int, remind_time.split(':'))
+                        
+                        if recurrence_type == 'daily':
+                            # Daily recurring reminder
+                            job = scheduler.add_job(
+                                schedule_reminder,
+                                'cron',
+                                hour=hour, minute=minute, timezone=tz,
+                                args=[context.application, chat_id, text, None, reminder_id, topic_id]
+                            )
+                            # Store the new job ID
+                            db.update_reminder(reminder_id, user_id, job_id=job.id)
+                        elif recurrence_type == 'weekly':
+                            # Weekly recurring reminder
+                            if day_of_week and ',' in day_of_week:
+                                # Multiple weekdays - create multiple jobs
+                                day_abbrevs = day_of_week.split(',')
+                                job_ids = []
+                                for day_abbrev in day_abbrevs:
+                                    job = scheduler.add_job(
+                                        schedule_reminder,
+                                        'cron',
+                                        day_of_week=day_abbrev, hour=hour, minute=minute, timezone=tz,
+                                        args=[context.application, chat_id, text, None, reminder_id, topic_id]
+                                    )
+                                    job_ids.append(job.id)
+                                # Store multiple job IDs
+                                db.update_reminder(reminder_id, user_id, job_id=','.join(job_ids))
+                            else:
+                                # Single weekday
+                                job = scheduler.add_job(
+                                    schedule_reminder,
+                                    'cron',
+                                    day_of_week=day_of_week, hour=hour, minute=minute, timezone=tz,
+                                    args=[context.application, chat_id, text, None, reminder_id, topic_id]
+                                )
+                                # Store the new job ID
+                                db.update_reminder(reminder_id, user_id, job_id=job.id)
+                        
                         await update.message.reply_text(f"✅ Recurring reminder {reminder_id} message updated to: {text}")
                     else:
                         # For one-time reminders, parse the ISO datetime and reschedule
@@ -1183,6 +1286,26 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
                         minute = int(parts[1])
                         if 0 <= hour <= 23 and 0 <= minute <= 59:
                             time_str = f"{hour:02d}:{minute:02d}"
+                            # Validate that the selected date+time is not in the past
+                            date_str = user_reminder_context[user_id]['date']
+                            chat = update.effective_chat
+                            tz_str = get_user_timezone(user_id, chat.type, chat.id)
+                            try:
+                                tz = pytz.timezone(tz_str)
+                            except Exception:
+                                tz = pytz.UTC
+                            try:
+                                selected_date = datetime.strptime(date_str, "%Y-%m-%d")
+                                candidate_dt = selected_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                                if candidate_dt.tzinfo is None:
+                                    candidate_dt = tz.localize(candidate_dt)
+                                if candidate_dt < datetime.now(tz):
+                                    await update.message.reply_text("The time is in the past. Please enter a future time:")
+                                    return
+                            except Exception as e:
+                                logging.error(f"Error validating time against date: {e}")
+                                await update.message.reply_text("Invalid time. Please try again with HH:MM or 2:30 PM format:")
+                                return
                             user_reminder_context[user_id]["time"] = time_str
                             user_reminder_context[user_id]["step"] = "time_selected"
                             
@@ -1199,6 +1322,27 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
                 parsed_time = parse_date(text, settings={'PREFER_DATES_FROM': 'future'})
                 if parsed_time:
                     time_str = parsed_time.strftime("%H:%M")
+                    # Validate that the selected date+time is not in the past
+                    date_str = user_reminder_context[user_id]['date']
+                    hour, minute = map(int, time_str.split(':'))
+                    chat = update.effective_chat
+                    tz_str = get_user_timezone(user_id, chat.type, chat.id)
+                    try:
+                        tz = pytz.timezone(tz_str)
+                    except Exception:
+                        tz = pytz.UTC
+                    try:
+                        selected_date = datetime.strptime(date_str, "%Y-%m-%d")
+                        candidate_dt = selected_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                        if candidate_dt.tzinfo is None:
+                            candidate_dt = tz.localize(candidate_dt)
+                        if candidate_dt < datetime.now(tz):
+                            await update.message.reply_text("The time is in the past. Please enter a future time:")
+                            return
+                    except Exception as e:
+                        logging.error(f"Error validating time against date: {e}")
+                        await update.message.reply_text("Invalid time. Please try again with HH:MM or 2:30 PM format:")
+                        return
                     user_reminder_context[user_id]["time"] = time_str
                     user_reminder_context[user_id]["step"] = "time_selected"
                     
@@ -1420,6 +1564,12 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
 async def reminder_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     
+    try:
+        await query.answer()
+    except Exception as e:
+        logging.warning(f"Failed to answer callback query: {e}")
+        # Continue processing even if answer fails
+    
     if query.data.startswith("remind_type:"):
         remind_type = query.data.split(":", 1)[1]
         if remind_type == "one_time":
@@ -1433,7 +1583,7 @@ async def reminder_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif remind_type == "recurring":
             # Show weekday selection for recurring reminders
             keyboard = [
-                [InlineKeyboardButton("✅ Every day", callback_data="select_all_days")],
+                [InlineKeyboardButton("Every day", callback_data="select_all_days")],
                 [InlineKeyboardButton("Monday", callback_data="toggle_day:monday")],
                 [InlineKeyboardButton("Tuesday", callback_data="toggle_day:tuesday")],
                 [InlineKeyboardButton("Wednesday", callback_data="toggle_day:wednesday")],
@@ -1525,7 +1675,7 @@ async def reminder_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Add "Every day" button
         if all_selected:
-            keyboard.append([InlineKeyboardButton("✅ Every day", callback_data="select_all_days")])
+            keyboard.append([InlineKeyboardButton("Every day", callback_data="select_all_days")])
         else:
             keyboard.append([InlineKeyboardButton("Every day", callback_data="select_all_days")])
         
@@ -1605,7 +1755,7 @@ async def reminder_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Add "Every day" button
         if all_selected:
-            keyboard.append([InlineKeyboardButton("✅ Every day", callback_data="edit_select_all_days")])
+            keyboard.append([InlineKeyboardButton("Every day", callback_data="edit_select_all_days")])
         else:
             keyboard.append([InlineKeyboardButton("Every day", callback_data="edit_select_all_days")])
         
@@ -1909,7 +2059,7 @@ async def reminder_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 # Add "Every day" button
                 if all_selected:
-                    keyboard.append([InlineKeyboardButton("✅ Every day", callback_data="edit_select_all_days")])
+                    keyboard.append([InlineKeyboardButton("Every day", callback_data="edit_select_all_days")])
                 else:
                     keyboard.append([InlineKeyboardButton("Every day", callback_data="edit_select_all_days")])
                 
@@ -1939,13 +2089,25 @@ async def reminder_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Show calendar for date selection (one-time reminder)
                 today = datetime.now()
                 keyboard = create_calendar_keyboard(today.year, today.month)
-                await query.edit_message_text("Edit cancelled.")
-                await context.bot.send_message(
-                    chat_id=query.message.chat.id,
-                    text="Select a date for your reminder:",
-                    reply_markup=keyboard,
-                    message_thread_id=query.message.message_thread_id if hasattr(query.message, 'message_thread_id') and query.message.message_thread_id else None
-                )
+                
+                try:
+                    # Try to send message with topic support
+                    await context.bot.send_message(
+                        chat_id=query.message.chat.id,
+                        text="Select a date for your reminder:",
+                        reply_markup=keyboard,
+                        message_thread_id=query.message.message_thread_id if hasattr(query.message, 'message_thread_id') and query.message.message_thread_id else None
+                    )
+                    await query.edit_message_text("Edit time - select a date:")
+                except Exception as e:
+                    # If topic fails, send to general chat
+                    await context.bot.send_message(
+                        chat_id=query.message.chat.id,
+                        text="Select a date for your reminder:",
+                        reply_markup=keyboard
+                    )
+                    await query.edit_message_text("Edit time - select a date:")
+                
                 return SELECTING_DATE
     
 
@@ -2564,7 +2726,7 @@ async def handle_edit_selection(update: Update, context: ContextTypes.DEFAULT_TY
             
             # Add "Every day" button
             if all_selected:
-                keyboard.append([InlineKeyboardButton("✅ Every day", callback_data="edit_select_all_days")])
+                keyboard.append([InlineKeyboardButton("Every day", callback_data="edit_select_all_days")])
             else:
                 keyboard.append([InlineKeyboardButton("Every day", callback_data="edit_select_all_days")])
             
@@ -2944,8 +3106,27 @@ async def admin_delete_reminder(update: Update, context: ContextTypes.DEFAULT_TY
 if __name__ == "__main__":
     import asyncio
     import dateutil.parser
+    from telegram.error import TimedOut, NetworkError
+    
+    # Configure application with better timeout settings
     app = ApplicationBuilder().token(TOKEN).build()
     main_event_loop = asyncio.get_event_loop()
+    
+    # Add error handler for network issues
+    async def error_handler(update, context):
+        """Handle network errors gracefully"""
+        if isinstance(context.error, (TimedOut, NetworkError)):
+            logging.warning(f"Network error: {context.error}")
+            # Try to send a message to the user if possible
+            if update and update.effective_chat:
+                try:
+                    await update.effective_chat.send_message("⚠️ Network timeout. Please try again in a moment.")
+                except:
+                    pass
+        else:
+            logging.error(f"Unhandled error: {context.error}")
+    
+    app.add_error_handler(error_handler)
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("remind", remind))
@@ -2959,11 +3140,19 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("adminlist", admin_list_reminders))
     app.add_handler(CommandHandler("admindelete", admin_delete_reminder))
     
-    app.add_handler(CallbackQueryHandler(reminder_button))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_reminder_text_input))
+    # Note-taking commands
+    note_handlers = notes_bot.get_note_handlers()
+    for handler in note_handlers:
+        app.add_handler(handler)
     
-
+    # Separate button handlers for notes and reminders
+    app.add_handler(CallbackQueryHandler(notes_bot.note_button_handler, pattern="^(note_help|cancel_edit_note|close_notes|back_to_notes|view_note:|edit_note:|delete_note:|edit_note_start:|delete_note_start:|edit_note_title:)"))
+    app.add_handler(CallbackQueryHandler(reminder_button, pattern="^(remind_type:|select_date:|select_all_days|toggle_day:|edit_toggle_day:|set_recurring_time|recurring_cancel|one_time_cancel|edit_reminder_start:|delete_reminder_start:|edit_reminder:|delete_reminder:|admin_delete_start:|admin_delete_reminder:|admin_delete_cancel|admin_close|close_list|calendar:|setoffset:|timezone_cancel|edit_message|edit_time|edit_cancel|delete_cancel|edit_select_all_days|edit_set_recurring_time|edit_toggle_day:)"))
+    
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_reminder_text_input))
     
     # Reschedule pending reminders from DB
     load_and_reschedule_pending_reminders(app)
-    app.run_polling() 
+    
+    # Run with better timeout settings
+    app.run_polling(timeout=30, read_timeout=30, write_timeout=30, connect_timeout=30) 
