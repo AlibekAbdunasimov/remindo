@@ -64,14 +64,29 @@ A powerful Telegram reminder bot with integrated note-taking functionality, supp
    pip install -r requirements.txt
    ```
 
-3. **Configure the bot**
-   - Open `Remindo_robot/bot.py`
-   - Replace the `TOKEN` variable with your bot token:
-     ```python
-     TOKEN = "your_bot_token_here"
+3. **Set up PostgreSQL database**
+   - Install PostgreSQL on your system
+   - Create a database and user for the bot
+   - See [DATABASE_MIGRATION.md](DATABASE_MIGRATION.md) for detailed instructions
+
+4. **Configure environment variables**
+   - Copy `env.example` to `.env`
+   - Set your bot token and database credentials:
+     ```env
+     TELEGRAM_BOT_TOKEN=your_bot_token_here
+     DB_HOST=localhost
+     DB_PORT=5432
+     DB_NAME=remindo_bot
+     DB_USER=your_username
+     DB_PASSWORD=your_password
      ```
 
-4. **Run the bot**
+5. **Initialize the database**
+   ```bash
+   python migrate_to_postgresql.py
+   ```
+
+6. **Run the bot**
    ```bash
    cd Remindo_robot
    python bot.py
@@ -183,18 +198,40 @@ A powerful Telegram reminder bot with integrated note-taking functionality, supp
 - **Permission checking**: Only group administrators can use admin commands
 - **Anonymous protection**: Admin commands are protected from "Send as Group" abuse
 
+## 🗄️ Database Migration
+
+**Important:** This bot now uses PostgreSQL instead of SQLite for better performance and scalability.
+
+### For New Installations
+- Follow the setup instructions above
+- PostgreSQL will be configured automatically
+
+### For Existing SQLite Users
+- Your existing data can be migrated automatically
+- See [DATABASE_MIGRATION.md](DATABASE_MIGRATION.md) for detailed migration instructions
+- The migration script will preserve all your reminders and notes
+
+### Migration Benefits
+- **Better Performance**: Handle more concurrent users
+- **Cloud Ready**: Easy deployment to cloud platforms
+- **Advanced Features**: Better timezone support, full-text search
+- **Scalability**: Grows with your bot's usage
+
 ## 🔧 Technical Details
 
 ### Dependencies
 - `python-telegram-bot==20.7` - Telegram Bot API wrapper
 - `APScheduler==3.10.4` - Job scheduling
 - `dateparser==1.2.0` - Date/time parsing
+- `psycopg2-binary==2.9.9` - PostgreSQL database adapter
+- `python-dotenv==1.0.0` - Environment variable management
 
 ### Database
-- **Dual SQLite databases**: Separate databases for reminders and notes
-- **Automatic initialization**: Both databases initialize automatically
+- **PostgreSQL database**: Production-ready database with better concurrency and scalability
+- **Automatic initialization**: Database and tables initialize automatically
 - **Rich data storage**: Supports recurring reminders, user timezone preferences, and note metadata
-- **Relational structure**: Proper indexing for efficient queries
+- **Advanced features**: Full-text search, proper timezone handling, and comprehensive indexing
+- **Migration support**: Easy migration from SQLite with provided migration script
 
 ### Error Handling
 - Retry mechanism with exponential backoff

@@ -177,6 +177,13 @@ async def note_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Check if this is a reply to another message
     if update.message.reply_to_message:
+        # If the replied message is from a bot (including this bot), ignore to prevent iOS tap-on-command behavior
+        replied_from = getattr(update.message.reply_to_message, 'from_user', None)
+        if replied_from and getattr(replied_from, 'is_bot', False):
+            await update.message.reply_text(
+                "Please reply to a user's message to save it as a note (bot messages are ignored)."
+            )
+            return
         # Check if this is a forum topic auto-reply (reply message ID == topic ID)
         replied_message = update.message.reply_to_message
         if topic_id and replied_message.message_id == topic_id:

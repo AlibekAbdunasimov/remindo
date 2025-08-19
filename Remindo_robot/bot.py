@@ -3,6 +3,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, Application, CallbackQueryHandler, MessageHandler, filters
 from telegram.error import BadRequest
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from dateparser import parse as parse_date
 from datetime import datetime, timedelta
 import pytz
@@ -27,7 +28,9 @@ TOKEN = config.TOKEN  # Bot token from config file
 REMINDER_MAX_RETRIES = config.REMINDER_MAX_RETRIES  # Maximum number of retry attempts
 REMINDER_RETRY_DELAY_BASE = config.REMINDER_RETRY_DELAY_BASE  # Base delay for exponential backoff (2^attempt seconds)
 
-scheduler = BackgroundScheduler()
+scheduler = BackgroundScheduler(jobstores={
+    'default': SQLAlchemyJobStore(url=config.DATABASE_URL)
+})
 scheduler.start()
 
 db.init_db()
@@ -35,6 +38,10 @@ db.init_db()
 # Store timezones for both users and groups
 user_timezones = {}  # for private chats: user_id -> tz
 chat_timezones = {}  # for groups: chat_id -> tz
+
+# Global app and loop references used by scheduled jobs (must not be passed as job args)
+main_application = None
+main_event_loop = None
 
 def load_timezone_preferences():
     """Load timezone preferences from database into memory"""
@@ -587,12 +594,12 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
             time_str = recurrence['time']
             message = rest.split(time_str, 1)[1].strip()
             hour, minute = map(int, time_str.split(':'))
-            reminder_id = db.add_reminder(update.message.from_user.id, chat.id, message, time_str, tz_str, is_recurring=1, recurrence_type='daily', topic_id=topic_id)
+            reminder_id = db.add_reminder(update.message.from_user.id, chat.id, message, time_str, tz_str, is_recurring=True, recurrence_type='daily', topic_id=topic_id)
             job = scheduler.add_job(
                 schedule_reminder,
                 'cron',
                 hour=hour, minute=minute, timezone=tz,
-                args=[context.application, chat.id, message, None, reminder_id, topic_id]
+                args=[chat.id, message, None, reminder_id, topic_id]
             )
             # Store the job ID
             db.update_reminder(reminder_id, update.message.from_user.id, job_id=job.id)
@@ -603,12 +610,12 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
             time_str = recurrence['time']
             message = rest.split(time_str, 1)[1].strip()
             hour, minute = map(int, time_str.split(':'))
-            reminder_id = db.add_reminder(update.message.from_user.id, chat.id, message, time_str, tz_str, is_recurring=1, recurrence_type='weekly', day_of_week=day, topic_id=topic_id)
+            reminder_id = db.add_reminder(update.message.from_user.id, chat.id, message, time_str, tz_str, is_recurring=True, recurrence_type='weekly', day_of_week=day, topic_id=topic_id)
             job = scheduler.add_job(
                 schedule_reminder,
                 'cron',
                 day_of_week=day, hour=hour, minute=minute, timezone=tz,
-                args=[context.application, chat.id, message, None, reminder_id, topic_id]
+                args=[chat.id, message, None, reminder_id, topic_id]
             )
             # Store the job ID
             db.update_reminder(reminder_id, update.message.from_user.id, job_id=job.id)
@@ -669,7 +676,7 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = chat.id
     reminder_id = db.add_reminder(update.message.from_user.id, chat_id, reminder_msg, reminder_time.isoformat(), tz_str, topic_id=topic_id)
     try:
-        job = scheduler.add_job(schedule_reminder, 'date', run_date=reminder_time, args=[context.application, chat_id, reminder_msg, reminder_time, reminder_id, topic_id])
+        job = scheduler.add_job(schedule_reminder, 'date', run_date=reminder_time, args=[chat_id, reminder_msg, reminder_time, reminder_id, topic_id])
         # Store the job ID
         db.update_reminder(reminder_id, update.message.from_user.id, job_id=job.id)
         topic_info = f" in {topic_name}" if topic_id else ""
@@ -760,8 +767,18 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
                         except Exception:
                             tz = pytz.UTC
                         
-                        # Parse time string (e.g., "15:30") for recurring reminders
-                        hour, minute = map(int, remind_time.split(':'))
+                        # Parse time for recurring reminders
+                        if isinstance(remind_time, str):
+                            if ':' in remind_time and len(remind_time) <= 8:
+                                # Time string format (e.g., "15:30")
+                                hour, minute = map(int, remind_time.split(':'))
+                            else:
+                                # ISO timestamp string - parse it
+                                reminder_datetime = dateutil.parser.isoparse(remind_time)
+                                hour, minute = reminder_datetime.hour, reminder_datetime.minute
+                        else:
+                            # Already a datetime object
+                            hour, minute = remind_time.hour, remind_time.minute
                         
                         if recurrence_type == 'daily':
                             # Daily recurring reminder
@@ -769,7 +786,7 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
                                 schedule_reminder,
                                 'cron',
                                 hour=hour, minute=minute, timezone=tz,
-                                args=[context.application, chat_id, text, None, reminder_id, topic_id]
+                                args=[chat_id, text, None, reminder_id, topic_id]
                             )
                             # Store the new job ID
                             db.update_reminder(reminder_id, user_id, job_id=job.id)
@@ -784,7 +801,7 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
                                         schedule_reminder,
                                         'cron',
                                         day_of_week=day_abbrev, hour=hour, minute=minute, timezone=tz,
-                                        args=[context.application, chat_id, text, None, reminder_id, topic_id]
+                                        args=[chat_id, text, None, reminder_id, topic_id]
                                     )
                                     job_ids.append(job.id)
                                 # Store multiple job IDs
@@ -795,7 +812,7 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
                                     schedule_reminder,
                                     'cron',
                                     day_of_week=day_of_week, hour=hour, minute=minute, timezone=tz,
-                                    args=[context.application, chat_id, text, None, reminder_id, topic_id]
+                                    args=[chat_id, text, None, reminder_id, topic_id]
                                 )
                                 # Store the new job ID
                                 db.update_reminder(reminder_id, user_id, job_id=job.id)
@@ -817,7 +834,7 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
                             schedule_reminder, 
                             'date', 
                             run_date=reminder_time, 
-                            args=[context.application, chat_id, text, reminder_time, reminder_id, topic_id]
+                            args=[chat_id, text, reminder_time, reminder_id, topic_id]
                         )
                         # Store the new job ID
                         db.update_reminder(reminder_id, user_id, job_id=job.id)
@@ -891,7 +908,7 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
                                     schedule_reminder,
                                     'cron',
                                     hour=hour, minute=minute, timezone=tz,
-                                    args=[context.application, chat.id, edit_context["current_reminder"][1], None, reminder_id, topic_id]
+                                    args=[chat.id, edit_context["current_reminder"][1], None, reminder_id, topic_id]
                                 )
                                 # Store the new job ID
                                 db.update_reminder(reminder_id, user_id, job_id=job.id)
@@ -915,7 +932,7 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
                                         schedule_reminder,
                                         'cron',
                                         day_of_week=day_abbrev, hour=hour, minute=minute, timezone=tz,
-                                        args=[context.application, chat.id, edit_context["current_reminder"][1], None, reminder_id, topic_id]
+                                        args=[chat.id, edit_context["current_reminder"][1], None, reminder_id, topic_id]
                                     )
                                     job_ids.append(job.id)
                                 
@@ -991,7 +1008,7 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
                                 schedule_reminder, 
                                 'date', 
                                 run_date=reminder_time, 
-                                args=[context.application, chat.id, edit_context["current_reminder"][1], reminder_time, reminder_id]
+                                args=[chat.id, edit_context["current_reminder"][1], reminder_time, reminder_id]
                             )
                             # Store the new job ID
                             db.update_reminder(reminder_id, user_id, job_id=job.id)
@@ -1065,7 +1082,7 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
                                 schedule_reminder,
                                 'cron',
                                 hour=hour, minute=minute, timezone=tz,
-                                args=[context.application, chat.id, edit_context["current_reminder"][1], None, reminder_id, topic_id]
+                                args=[chat.id, edit_context["current_reminder"][1], None, reminder_id, topic_id]
                             )
                             # Store the new job ID
                             db.update_reminder(reminder_id, user_id, job_id=job.id)
@@ -1089,7 +1106,7 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
                                     schedule_reminder,
                                     'cron',
                                     day_of_week=day_abbrev, hour=hour, minute=minute, timezone=tz,
-                                    args=[context.application, chat.id, edit_context["current_reminder"][1], None, reminder_id, topic_id]
+                                    args=[chat.id, edit_context["current_reminder"][1], None, reminder_id, topic_id]
                                 )
                                 job_ids.append(job.id)
                             
@@ -1191,7 +1208,7 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
                                         schedule_reminder,
                                         'cron',
                                         hour=hour, minute=minute, timezone=tz,
-                                        args=[context.application, chat.id, edit_context["current_reminder"][1], None, reminder_id, topic_id]
+                                        args=[chat.id, edit_context["current_reminder"][1], None, reminder_id, topic_id]
                                     )
                                 elif recurrence_type == 'weekly':
                                     # Weekly recurring reminder
@@ -1204,7 +1221,7 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
                                                 schedule_reminder,
                                                 'cron',
                                                 day_of_week=day_abbrev, hour=hour, minute=minute, timezone=tz,
-                                                args=[context.application, chat.id, edit_context["current_reminder"][1], None, reminder_id, topic_id]
+                                                args=[chat.id, edit_context["current_reminder"][1], None, reminder_id, topic_id]
                                             )
                                             job_ids.append(job.id)
                                         # Store multiple job IDs
@@ -1215,7 +1232,7 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
                                             schedule_reminder,
                                             'cron',
                                             day_of_week=day_of_week, hour=hour, minute=minute, timezone=tz,
-                                            args=[context.application, chat.id, edit_context["current_reminder"][1], None, reminder_id, topic_id]
+                                            args=[chat.id, edit_context["current_reminder"][1], None, reminder_id, topic_id]
                                         )
                                         # Store the new job ID
                                         db.update_reminder(reminder_id, user_id, job_id=job.id)
@@ -1233,7 +1250,7 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
                                     schedule_reminder, 
                                     'date', 
                                     run_date=reminder_time, 
-                                    args=[context.application, chat.id, edit_context["current_reminder"][1], reminder_time, reminder_id, topic_id]
+                                    args=[chat.id, edit_context["current_reminder"][1], reminder_time, reminder_id, topic_id]
                                 )
                                 # Store the new job ID
                                 db.update_reminder(reminder_id, user_id, job_id=job.id)
@@ -1462,7 +1479,7 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
         
         # Save to database and schedule
         reminder_id = db.add_reminder(user_id, chat.id, message, reminder_time.isoformat(), tz_str, topic_id=topic_id)
-        job = scheduler.add_job(schedule_reminder, 'date', run_date=reminder_time, args=[context.application, chat.id, message, reminder_time, reminder_id, topic_id])
+        job = scheduler.add_job(schedule_reminder, 'date', run_date=reminder_time, args=[chat.id, message, reminder_time, reminder_id, topic_id])
         # Store the job ID
         db.update_reminder(reminder_id, user_id, job_id=job.id)
         
@@ -1515,12 +1532,12 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
         # Determine if it's daily or weekly
         if len(selected_days) == 7:  # All days selected
             # Create daily recurring reminder
-            reminder_id = db.add_reminder(user_id, chat.id, message, time_str, tz_str, is_recurring=1, recurrence_type='daily', topic_id=topic_id)
+            reminder_id = db.add_reminder(user_id, chat.id, message, time_str, tz_str, is_recurring=True, recurrence_type='daily', topic_id=topic_id)
             job = scheduler.add_job(
                 schedule_reminder,
                 'cron',
                 hour=hour, minute=minute, timezone=tz,
-                args=[context.application, chat.id, message, None, reminder_id, topic_id]
+                args=[chat.id, message, None, reminder_id, topic_id]
             )
             # Store the job ID
             db.update_reminder(reminder_id, user_id, job_id=job.id)
@@ -1532,7 +1549,7 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
             day_abbrevs = [day_mapping.get(day, day) for day in selected_days]
             days_string = ','.join(day_abbrevs)
             
-            reminder_id = db.add_reminder(user_id, chat.id, message, time_str, tz_str, is_recurring=1, recurrence_type='weekly', day_of_week=days_string, topic_id=topic_id)
+            reminder_id = db.add_reminder(user_id, chat.id, message, time_str, tz_str, is_recurring=True, recurrence_type='weekly', day_of_week=days_string, topic_id=topic_id)
             
             # Create multiple cron jobs for each day
             job_ids = []
@@ -1541,7 +1558,7 @@ async def handle_reminder_text_input(update: Update, context: ContextTypes.DEFAU
                     schedule_reminder,
                     'cron',
                     day_of_week=day_abbrev, hour=hour, minute=minute, timezone=tz,
-                    args=[context.application, chat.id, message, None, reminder_id, topic_id]
+                    args=[chat.id, message, None, reminder_id, topic_id]
                 )
                 job_ids.append(job.id)
             
@@ -1965,14 +1982,34 @@ async def reminder_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         reminder_id, message, remind_time, timezone, is_recurring, recurrence_type, day_of_week, chat_id, topic_id = reminder
         
-        # Format the time for display
+        # Format the time for display in the reminder's stored timezone
         try:
+            # Resolve reminder's own timezone for display
+            try:
+                reminder_tz = pytz.timezone(timezone)
+            except Exception:
+                reminder_tz = pytz.UTC
             if is_recurring:
-                time_display = remind_time  # For recurring reminders, time is already in HH:MM format
+                # Convert stored remind_time to reminder's timezone and show HH:MM
+                if isinstance(remind_time, str):
+                    try:
+                        reminder_dt = dateutil.parser.isoparse(remind_time)
+                    except Exception:
+                        reminder_dt = dateutil.parser.parse(remind_time)
+                else:
+                    reminder_dt = remind_time
+                if reminder_dt.tzinfo is None:
+                    reminder_dt = reminder_tz.localize(reminder_dt)
+                time_display = reminder_dt.astimezone(reminder_tz).strftime("%H:%M")
             else:
-                # Parse ISO time string and format it nicely
-                reminder_datetime = dateutil.parser.isoparse(remind_time)
-                time_display = reminder_datetime.strftime("%Y-%m-%d %H:%M:%S")
+                # One-time: display using reminder's stored timezone
+                if isinstance(remind_time, str):
+                    reminder_datetime = dateutil.parser.isoparse(remind_time)
+                else:
+                    reminder_datetime = remind_time
+                if reminder_datetime.tzinfo is None:
+                    reminder_datetime = reminder_tz.localize(reminder_datetime)
+                time_display = reminder_datetime.astimezone(reminder_tz).strftime("%Y-%m-%d %H:%M:%S")
         except Exception as e:
             time_display = remind_time  # Fallback to original if parsing fails
             logging.error(f"Error parsing reminder time for display: {e}")
@@ -2250,7 +2287,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Operation cancelled.")
     return
 
-async def send_reminder(application: Application, chat_id: int, message: str, reminder_id=None, topic_id=None, max_retries=None):
+async def send_reminder(chat_id: int, message: str, reminder_id=None, topic_id=None, max_retries=None):
     if max_retries is None:
         max_retries = REMINDER_MAX_RETRIES
     """
@@ -2263,11 +2300,11 @@ async def send_reminder(application: Application, chat_id: int, message: str, re
         try:
             if topic_id is not None:
                 # Send to specific topic
-                await application.bot.send_message(chat_id=chat_id, text=message, message_thread_id=topic_id)
+                await main_application.bot.send_message(chat_id=chat_id, text=message, message_thread_id=topic_id)
                 logging.info(f"Reminder sent to chat_id={chat_id} topic_id={topic_id}")
             else:
                 # Send to general chat
-                await application.bot.send_message(chat_id=chat_id, text=message)
+                await main_application.bot.send_message(chat_id=chat_id, text=message)
                 logging.info(f"Reminder sent to chat_id={chat_id}")
             
             # Success - mark as sent
@@ -2306,14 +2343,14 @@ async def send_reminder(application: Application, chat_id: int, message: str, re
     
     return False
 
-def schedule_reminder(application: Application, chat_id: int, message: str, reminder_time, reminder_id=None, topic_id=None):
+def schedule_reminder(chat_id: int, message: str, reminder_time, reminder_id=None, topic_id=None):
     global main_event_loop
     logging.info(f"schedule_reminder called for chat_id={chat_id} topic_id={topic_id} at {reminder_time} with message: {message}")
     try:
         if main_event_loop is not None:
             # Create a coroutine that handles the result
             async def send_with_result():
-                success = await send_reminder(application, chat_id, message, reminder_id, topic_id)
+                success = await send_reminder(chat_id, message, reminder_id, topic_id)
                 if not success:
                     logging.error(f"Reminder {reminder_id} failed to send after all retries")
                     # Could add additional handling here (e.g., notify admin, store in failed queue)
@@ -2341,8 +2378,39 @@ def load_and_reschedule_pending_reminders(application):
                 except Exception:
                     tz = pytz.UTC
                 
-                # Parse time string (e.g., "15:30") for recurring reminders
-                hour, minute = map(int, remind_time.split(':'))
+                # If jobs already exist in persistent store, skip rescheduling
+                if recurrence_type == 'daily':
+                    if job_id and scheduler.get_job(job_id):
+                        logging.info(f"Skipping reschedule for recurring daily reminder {reminder_id}; job already exists")
+                        continue
+                elif recurrence_type == 'weekly':
+                    existing_job_ids = db.get_reminder_job_ids(reminder_id) if job_id else []
+                    day_abbrevs_expected = day_of_week.split(',') if day_of_week and ',' in day_of_week else ([day_of_week] if day_of_week else [])
+                    if existing_job_ids:
+                        all_exist = all(scheduler.get_job(jid) is not None for jid in existing_job_ids)
+                        # If we have as many existing jobs as expected days and they all exist, skip
+                        if all_exist and (len(existing_job_ids) == len(day_abbrevs_expected) if day_abbrevs_expected else True):
+                            logging.info(f"Skipping reschedule for recurring weekly reminder {reminder_id}; jobs already exist")
+                            continue
+
+                # Extract hour and minute for recurring reminders from either a time string or a datetime
+                try:
+                    if isinstance(remind_time, str):
+                        time_str = remind_time.strip()
+                        try:
+                            # Try ISO first
+                            rt_dt = dateutil.parser.isoparse(time_str)
+                        except Exception:
+                            # Fallback to generic time parsing (handles HH:MM, HH:MM:SS, and AM/PM)
+                            # Use today's date as default; tz-aware not needed for hour/minute extraction
+                            rt_dt = dateutil.parser.parse(time_str)
+                        hour, minute = rt_dt.hour, rt_dt.minute
+                    else:
+                        # Datetime object returned by DB driver
+                        hour, minute = remind_time.hour, remind_time.minute
+                except Exception as e:
+                    logging.error(f"Failed to parse recurring remind_time for reminder {reminder_id}: {e}")
+                    continue
                 
                 if recurrence_type == 'daily':
                     # Daily recurring reminder
@@ -2352,6 +2420,9 @@ def load_and_reschedule_pending_reminders(application):
                         hour=hour, minute=minute, timezone=tz,
                         args=[application, chat_id, message, None, reminder_id, topic_id]
                     )
+                    # Store the new job ID if changed/missing
+                    if not job_id or job_id != job.id:
+                        db.update_reminder(reminder_id, user_id, job_id=job.id)
                 elif recurrence_type == 'weekly':
                     # Weekly recurring reminder
                     if ',' in day_of_week:
@@ -2363,7 +2434,7 @@ def load_and_reschedule_pending_reminders(application):
                                 schedule_reminder,
                                 'cron',
                                 day_of_week=day_abbrev, hour=hour, minute=minute, timezone=tz,
-                                args=[application, chat_id, message, None, reminder_id, topic_id]
+                                args=[chat_id, message, None, reminder_id, topic_id]
                             )
                             job_ids.append(job.id)
                         # Store multiple job IDs
@@ -2374,32 +2445,40 @@ def load_and_reschedule_pending_reminders(application):
                             schedule_reminder,
                             'cron',
                             day_of_week=day_of_week, hour=hour, minute=minute, timezone=tz,
-                            args=[application, chat_id, message, None, reminder_id, topic_id]
+                            args=[chat_id, message, None, reminder_id, topic_id]
                         )
                         # Store the new job ID
-                        db.update_reminder(reminder_id, user_id, job_id=job.id)
+                        if not job_id or job_id != job.id:
+                            db.update_reminder(reminder_id, user_id, job_id=job.id)
                 logging.info(f"Rescheduled recurring reminder {reminder_id} for chat_id={chat_id} topic_id={topic_id}")
                 
             else:
                 # Handle one-time reminders
-                # Parse the stored ISO time string
-                reminder_time = dateutil.parser.isoparse(remind_time)
+                # Parse the stored time which may be a datetime or an ISO string
+                if isinstance(remind_time, str):
+                    reminder_time = dateutil.parser.isoparse(remind_time)
+                else:
+                    reminder_time = remind_time
                 # Only reschedule if the time is still in the future
                 if reminder_time > datetime.now(reminder_time.tzinfo):
                     # Remove old job if it exists
                     if job_id:
-                        try:
-                            scheduler.remove_job(job_id)
-                            logging.info(f"Removed old job {job_id} for reminder {reminder_id}")
-                        except Exception as e:
-                            logging.warning(f"Failed to remove old job {job_id}: {e}")
+                        # Only remove if it exists (persistent store may already have it)
+                        existing = scheduler.get_job(job_id)
+                        if existing:
+                            try:
+                                scheduler.remove_job(job_id)
+                                logging.info(f"Removed old job {job_id} for reminder {reminder_id}")
+                            except Exception as e:
+                                logging.warning(f"Failed to remove old job {job_id}: {e}")
                     
                     # Add new job
+                    # Avoid duplicate if job with same id already exists
                     job = scheduler.add_job(
                         schedule_reminder,
                         'date',
                         run_date=reminder_time,
-                        args=[application, chat_id, message, reminder_time, reminder_id, topic_id]
+                        args=[chat_id, message, reminder_time, reminder_id, topic_id]
                     )
                     # Update job ID in database
                     db.update_reminder(reminder_id, user_id, job_id=job.id)
@@ -2453,13 +2532,8 @@ async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"You have no active reminders{topic_info}.")
             return
     
-    # Get user's timezone
-    tz_str = get_user_timezone(user_id, update.effective_chat.type, chat_id)
-    
-    try:
-        tz = pytz.timezone(tz_str)
-    except Exception:
-        tz = pytz.UTC
+    # Note: For listing, we display each reminder in its own stored timezone, not the user's current timezone
+    # So we won't compute a single tz for the whole list here.
     
     if show_all_topics:
         message = "📋 Your active reminders in this group:\n\n"
@@ -2473,18 +2547,41 @@ async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Parse the reminder time
         try:
             if is_recurring:
-                if recurrence_type == 'daily':
-                    time_display = f"Every day at {remind_time}"
-                elif recurrence_type == 'weekly':
-                    time_display = f"Every {day_of_week.title()} at {remind_time}"
+                # Display time in the reminder's own timezone (HH:MM)
+                try:
+                    tz_reminder = pytz.timezone(timezone)
+                except Exception:
+                    tz_reminder = pytz.UTC
+                if isinstance(remind_time, str):
+                    try:
+                        reminder_dt = dateutil.parser.isoparse(remind_time)
+                    except Exception:
+                        reminder_dt = dateutil.parser.parse(remind_time)
                 else:
-                    time_display = f"Recurring: {remind_time}"
+                    reminder_dt = remind_time
+                if reminder_dt.tzinfo is None:
+                    reminder_dt = tz_reminder.localize(reminder_dt)
+                display_time = reminder_dt.astimezone(tz_reminder).strftime("%H:%M")
+                
+                if recurrence_type == 'daily':
+                    time_display = f"Every day at {display_time}"
+                elif recurrence_type == 'weekly':
+                    time_display = f"Every {day_of_week.title()} at {display_time}"
+                else:
+                    time_display = f"Recurring: {display_time}"
             else:
-                # Parse ISO time string
-                reminder_datetime = dateutil.parser.isoparse(remind_time)
+                # One-time: display in the reminder's own timezone
+                try:
+                    tz_reminder = pytz.timezone(timezone)
+                except Exception:
+                    tz_reminder = pytz.UTC
+                if isinstance(remind_time, str):
+                    reminder_datetime = dateutil.parser.isoparse(remind_time)
+                else:
+                    reminder_datetime = remind_time
                 if reminder_datetime.tzinfo is None:
-                    reminder_datetime = tz.localize(reminder_datetime)
-                time_display = reminder_datetime.strftime("%Y-%m-%d %H:%M")
+                    reminder_datetime = tz_reminder.localize(reminder_datetime)
+                time_display = reminder_datetime.astimezone(tz_reminder).strftime("%Y-%m-%d %H:%M")
         except Exception as e:
             time_display = remind_time
             logging.error(f"Error parsing reminder time: {e}")
@@ -2638,14 +2735,31 @@ async def edit_reminder_command(update: Update, context: ContextTypes.DEFAULT_TY
         
         reminder_id, message, remind_time, timezone, is_recurring, recurrence_type, day_of_week, chat_id, topic_id = reminder
         
-        # Format the time for display
+        # Format the time for display in the reminder's stored timezone
         try:
+            try:
+                reminder_tz = pytz.timezone(timezone)
+            except Exception:
+                reminder_tz = pytz.UTC
             if is_recurring:
-                time_display = remind_time  # For recurring reminders, time is already in HH:MM format
+                if isinstance(remind_time, str):
+                    try:
+                        reminder_dt = dateutil.parser.isoparse(remind_time)
+                    except Exception:
+                        reminder_dt = dateutil.parser.parse(remind_time)
+                else:
+                    reminder_dt = remind_time
+                if reminder_dt.tzinfo is None:
+                    reminder_dt = reminder_tz.localize(reminder_dt)
+                time_display = reminder_dt.astimezone(reminder_tz).strftime("%H:%M")
             else:
-                # Parse ISO time string and format it nicely
-                reminder_datetime = dateutil.parser.isoparse(remind_time)
-                time_display = reminder_datetime.strftime("%Y-%m-%d %H:%M:%S")
+                if isinstance(remind_time, str):
+                    reminder_datetime = dateutil.parser.isoparse(remind_time)
+                else:
+                    reminder_datetime = remind_time
+                if reminder_datetime.tzinfo is None:
+                    reminder_datetime = reminder_tz.localize(reminder_datetime)
+                time_display = reminder_datetime.astimezone(reminder_tz).strftime("%Y-%m-%d %H:%M:%S")
         except Exception as e:
             time_display = remind_time  # Fallback to original if parsing fails
             logging.error(f"Error parsing reminder time for display: {e}")
@@ -3109,8 +3223,14 @@ if __name__ == "__main__":
     from telegram.error import TimedOut, NetworkError
     
     # Configure application with better timeout settings
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = (ApplicationBuilder()
+           .token(TOKEN)
+           .get_updates_read_timeout(30)
+           .get_updates_write_timeout(30)
+           .get_updates_connect_timeout(30)
+           .build())
     main_event_loop = asyncio.get_event_loop()
+    main_application = app
     
     # Add error handler for network issues
     async def error_handler(update, context):
@@ -3154,5 +3274,5 @@ if __name__ == "__main__":
     # Reschedule pending reminders from DB
     load_and_reschedule_pending_reminders(app)
     
-    # Run with better timeout settings
-    app.run_polling(timeout=30, read_timeout=30, write_timeout=30, connect_timeout=30) 
+    # Run the bot
+    app.run_polling() 
